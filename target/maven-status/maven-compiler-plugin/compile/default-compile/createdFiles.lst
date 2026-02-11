@@ -1,0 +1,5 @@
+com\sqlwrapper\Main.class
+com\sqlwrapper\config\AppConfig.class
+com\sqlwrapper\service\AIModelService.class
+com\sqlwrapper\service\DatabaseService.class
+com\sqlwrapper\service\SQLValidator.class
