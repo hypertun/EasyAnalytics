@@ -7,6 +7,9 @@ import org.slf4j.LoggerFactory;
 public class AppConfig {
     private static final Logger logger = LoggerFactory.getLogger(AppConfig.class);
     
+    // Store Dotenv instance for dynamic config access
+    private final Dotenv dotenv;
+    
     private final String groqApiKey;
     private final String databaseName;
     private final String databaseUser;
@@ -118,6 +121,7 @@ public class AppConfig {
 
         logger.info("Configuration loaded successfully");
         return new AppConfig(
+            dotenv,
             groqApiKey,
             databaseName,
             databaseUser,
@@ -135,10 +139,11 @@ public class AppConfig {
         );
     }
 
-    public AppConfig(String groqApiKey, String databaseName, String databaseUser, String databasePassword,
+    public AppConfig(Dotenv dotenv, String groqApiKey, String databaseName, String databaseUser, String databasePassword,
                      String databaseHost, int databasePort, int maxQueryRows, int queryTimeoutSeconds,
                      boolean sshEnabled, String sshHost, int sshPort, String sshUsername, String sshPrivateKeyPath,
                      String databaseType) {
+        this.dotenv = dotenv;
         this.groqApiKey = groqApiKey;
         this.databaseName = databaseName;
         this.databaseUser = databaseUser;
@@ -165,6 +170,23 @@ public class AppConfig {
     public int getMaxQueryRows() { return maxQueryRows; }
     public int getQueryTimeoutSeconds() { return queryTimeoutSeconds; }
     public String getDatabaseType() { return databaseType; }
+
+    // New getters for database properties and AI configuration
+    public String getDatabaseProperties() { 
+        return dotenv.get("DATABASE_PROPERTIES", "useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"); 
+    }
+    
+    public String getAiProvider() { 
+        return dotenv.get("AI_PROVIDER", "groq"); 
+    }
+
+    public String getAiModel() { 
+        return dotenv.get("AI_MODEL", "llama-3.1-8b-instant"); 
+    }
+
+    public String getAiApiBaseUrl() { 
+        return dotenv.get("AI_API_BASE_URL", "https://api.groq.com/openai/v1"); 
+    }
 
     // SSH getters
     public boolean isSshEnabled() { return sshEnabled; }

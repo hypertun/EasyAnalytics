@@ -28,9 +28,22 @@ public class DatabaseService {
     private final HikariDataSource dataSource;
     private ClientSession sshSession;
     private SshClient sshClient;
+    private final AppConfig config;  // Added to store config for database type
     private static final Logger logger = LoggerFactory.getLogger(DatabaseService.class);
+    private static final int SSH_TUNNEL_LOCAL_PORT = 3307;  // Configurable SSH port
 
     public DatabaseService(AppConfig config) {
+        // Validate database type early
+        String dbType = config.getDatabaseType().toLowerCase();
+        if (!"mysql".equals(dbType) && !"postgresql".equals(dbType) && 
+            !"mssql".equals(dbType) && !"oracle".equals(dbType)) {
+            throw new IllegalArgumentException("Unsupported database type: " + dbType + 
+                ". Supported types: mysql, postgresql, mssql, oracle");
+        }
+        
+        // Store config for use in other methods
+        this.config = config;
+        
         this.sshSession = null;
 
         if (config.isSshEnabled()) {
@@ -38,11 +51,31 @@ public class DatabaseService {
         }
 
         String host = config.isSshEnabled() ? "localhost" : config.getDatabaseHost();
-        int port = config.isSshEnabled() ? 3307 : config.getDatabasePort();
+        int port = config.isSshEnabled() ? SSH_TUNNEL_LOCAL_PORT : config.getDatabasePort();
 
         HikariConfig hikariConfig = new HikariConfig();
-        hikariConfig.setJdbcUrl(String.format("jdbc:mysql://%s:%d/%s?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC",
-                host, port, config.getDatabaseName()));
+        String jdbcUrl;
+        switch (config.getDatabaseType().toLowerCase()) {
+            case "mysql":
+                jdbcUrl = String.format("jdbc:mysql://%s:%d/%s?%s",
+                        host, port, config.getDatabaseName(), config.getDatabaseProperties());
+                break;
+            case "postgresql":
+                jdbcUrl = String.format("jdbc:postgresql://%s:%d/%s?%s",
+                        host, port, config.getDatabaseName(), config.getDatabaseProperties());
+                break;
+            case "mssql":
+                jdbcUrl = String.format("jdbc:sqlserver://%s:%d;databaseName=%s;%s",
+                        host, port, config.getDatabaseName(), config.getDatabaseProperties());
+                break;
+            case "oracle":
+                jdbcUrl = String.format("jdbc:oracle:thin:@//%s:%d/%s",
+                        host, port, config.getDatabaseName());
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported database type: " + config.getDatabaseType());
+        }
+        hikariConfig.setJdbcUrl(jdbcUrl);
         hikariConfig.setUsername(config.getDatabaseUser());
         hikariConfig.setPassword(config.getDatabasePassword());
         hikariConfig.setMaximumPoolSize(10);
@@ -51,7 +84,7 @@ public class DatabaseService {
         hikariConfig.setMaxLifetime(1800000);
 
         this.dataSource = new HikariDataSource(hikariConfig);
-        
+
         logger.info("Database connection established. Host: {}, Port: {}", host, port);
     }
 
@@ -66,20 +99,19 @@ public class DatabaseService {
             ClientSession session = sshClient.connect(
                     config.getSshUsername(),
                     config.getSshHost(),
-                    config.getSshPort()
-            ).verify(10000).getSession();
+                    config.getSshPort()).verify(10000).getSession();
 
             FileKeyPairProvider keyProvider = new FileKeyPairProvider(Paths.get(config.getSshPrivateKeyPath()));
             keyProvider.setPasswordFinder(FilePasswordProvider.EMPTY);
             Iterable<KeyPair> keys = keyProvider.loadKeys(session);
-            
+
             for (KeyPair kp : keys) {
                 session.addPublicKeyIdentity(kp);
             }
-            
+
             session.auth().verify(10000);
 
-            SshdSocketAddress local = new SshdSocketAddress("localhost", 3307);
+            SshdSocketAddress local = new SshdSocketAddress("localhost", SSH_TUNNEL_LOCAL_PORT);
             SshdSocketAddress remote = new SshdSocketAddress(config.getDatabaseHost(), config.getDatabasePort());
             session.startLocalPortForwarding(local, remote);
 
@@ -93,10 +125,10 @@ public class DatabaseService {
 
     public List<Map<String, Object>> executeQuery(String sql, int maxRows) throws SQLException {
         List<Map<String, Object>> results = new ArrayList<>();
-        
+
         try (Connection conn = dataSource.getConnection();
-             Statement stmt = conn.createStatement();
-             ResultSet rs = stmt.executeQuery(sql)) {
+                Statement stmt = conn.createStatement();
+                ResultSet rs = stmt.executeQuery(sql)) {
 
             ResultSetMetaData metaData = rs.getMetaData();
             int columnCount = metaData.getColumnCount();
@@ -138,26 +170,55 @@ public class DatabaseService {
     }
 
     public Map<String, List<String>> getSchemaInfo() throws SQLException {
-    Map<String, List<String>> schema = new HashMap<>();
-
-    try (Connection conn = dataSource.getConnection();
-         Statement stmt = conn.createStatement();
-         ResultSet tables = stmt.executeQuery("SHOW TABLES")) {
-
-        while (tables.next()) {
-            String tableName = tables.getString(1);
-            List<String> columns = new ArrayList<>();
-
-            ResultSet columnsRS = stmt.executeQuery("DESCRIBE " + tableName);
-            while (columnsRS.next()) {
-                columns.add(columnsRS.getString("Field"));
+        Map<String, List<String>> schema = new HashMap<>();
+        
+        try (Connection conn = dataSource.getConnection()) {
+            String tableNameQuery;
+            String columnQueryTemplate;
+            
+            switch (config.getDatabaseType().toLowerCase()) {
+                case "mysql":
+                    tableNameQuery = "SHOW TABLES";
+                    columnQueryTemplate = "DESCRIBE %s";
+                    break;
+                case "postgresql":
+                    tableNameQuery = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'";
+                    columnQueryTemplate = "SELECT column_name FROM information_schema.columns WHERE table_name = '%s'";
+                    break;
+                case "mssql":
+                    tableNameQuery = "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE'";
+                    columnQueryTemplate = "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '%s'";
+                    break;
+                case "oracle":
+                    tableNameQuery = "SELECT TABLE_NAME FROM USER_TABLES";
+                    columnQueryTemplate = "SELECT COLUMN_NAME FROM USER_TAB_COLUMNS WHERE TABLE_NAME = '%s'";
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unsupported database type: " + config.getDatabaseType());
             }
-            columnsRS.close();
 
-            schema.put(tableName, columns);
+            try (Statement tableStmt = conn.createStatement();
+                    ResultSet tables = tableStmt.executeQuery(tableNameQuery)) {
+
+                while (tables.next()) {
+                    String tableName = tables.getString(1);
+                    List<String> columns = new ArrayList<>();
+
+                    // Use a separate statement for getting columns
+                    try (Statement columnStmt = conn.createStatement();
+                            ResultSet columnsRS = columnStmt
+                                    .executeQuery(String.format(columnQueryTemplate, tableName))) {
+
+                        while (columnsRS.next()) {
+                            columns.add(columnsRS.getString(1));
+                        }
+                    }
+
+                    schema.put(tableName, columns);
+                }
+            }
         }
+        
+        return schema;
     }
-
-    return schema;
-}
 }
