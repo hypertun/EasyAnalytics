@@ -7,8 +7,11 @@ group = 'com.sqlwrapper'
 version = '1.0-SNAPSHOT'
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
 }
 
 application {
@@ -17,6 +20,7 @@ application {
 
 repositories {
     mavenCentral()
+    maven { url 'https://mockito.org/maven2' }
 }
 
 dependencies {
@@ -44,6 +48,10 @@ dependencies {
     
     // Testing
     testImplementation 'org.junit.jupiter:junit-jupiter:5.10.2'
+    testImplementation 'org.mockito:mockito-core:5.11.0'
+    testImplementation 'org.mockito:mockito-junit-jupiter:5.11.0'
+    testImplementation 'com.h2database:h2:2.2.224'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 test {
@@ -53,7 +61,7 @@ test {
 // Optional: Enable incremental compilation
 tasks.withType(JavaCompile).configureEach {
     options.compilerArgs += ['-parameters']
-    options.release = 17
+    options.release = 25
 }
 
 run {

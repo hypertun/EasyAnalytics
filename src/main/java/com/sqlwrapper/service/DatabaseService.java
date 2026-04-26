@@ -12,7 +12,13 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import com.sqlwrapper.config.AppConfig;
 import java.nio.file.Paths;
-import java.security.KeyPair;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.nio.file.attribute.FileTime;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
@@ -22,7 +28,8 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.io.IOException;
+import java.security.KeyPair;
+import java.util.Iterator;
 
 public class DatabaseService {
     private final HikariDataSource dataSource;
@@ -31,20 +38,48 @@ public class DatabaseService {
     private final AppConfig config;  // Added to store config for database type
     private static final Logger logger = LoggerFactory.getLogger(DatabaseService.class);
     private static final int SSH_TUNNEL_LOCAL_PORT = 3307;  // Configurable SSH port
+    private Map<String, List<String>> cachedSchema;
+    private long lastSchemaFetchTime; // Timestamp in milliseconds
+    private final long schemaCacheTtlMs; // Configurable TTL
+    private final String schemaCacheFilePath; // Path to cache file
+    private final ObjectMapper objectMapper = new ObjectMapper(); // Jackson ObjectMapper
+
+    // New constructor for dependency injection (testability)
+    public DatabaseService(AppConfig config, HikariDataSource dataSource) {
+        this.config = config;
+        this.dataSource = dataSource;
+        this.sshSession = null;
+        this.sshClient = null; // Ensure sshClient is null initially
+        this.cachedSchema = null;
+        this.lastSchemaFetchTime = 0;
+
+        // Initialize from config
+        this.schemaCacheTtlMs = config.getSchemaCacheTtlMs();
+        this.schemaCacheFilePath = config.getSchemaCacheFilePath();
+
+        logger.info("DatabaseService initialized with injected DataSource. Host: {}, Port: {}",
+                config.getDatabaseHost(), config.getDatabasePort());
+    }
 
     public DatabaseService(AppConfig config) {
         // Validate database type early
         String dbType = config.getDatabaseType().toLowerCase();
-        if (!"mysql".equals(dbType) && !"postgresql".equals(dbType) && 
+        if (!"mysql".equals(dbType) && !"postgresql".equals(dbType) &&
             !"mssql".equals(dbType) && !"oracle".equals(dbType)) {
-            throw new IllegalArgumentException("Unsupported database type: " + dbType + 
+            throw new IllegalArgumentException("Unsupported database type: " + dbType +
                 ". Supported types: mysql, postgresql, mssql, oracle");
         }
-        
+
         // Store config for use in other methods
         this.config = config;
-        
+
+        // Initialize from config
+        this.schemaCacheTtlMs = config.getSchemaCacheTtlMs();
+        this.schemaCacheFilePath = config.getSchemaCacheFilePath();
+
         this.sshSession = null;
+        this.cachedSchema = null;
+        this.lastSchemaFetchTime = 0;
 
         if (config.isSshEnabled()) {
             this.sshSession = setupSSHTunnel(config);
@@ -127,8 +162,8 @@ public class DatabaseService {
         List<Map<String, Object>> results = new ArrayList<>();
 
         try (Connection conn = dataSource.getConnection();
-                Statement stmt = conn.createStatement();
-                ResultSet rs = stmt.executeQuery(sql)) {
+             Statement stmt = conn.createStatement();
+             ResultSet rs = stmt.executeQuery(sql)) {
 
             ResultSetMetaData metaData = rs.getMetaData();
             int columnCount = metaData.getColumnCount();
@@ -169,13 +204,90 @@ public class DatabaseService {
         }
     }
 
-    public Map<String, List<String>> getSchemaInfo() throws SQLException {
-        Map<String, List<String>> schema = new HashMap<>();
-        
+    // New method to load schema from cache file
+    private Map<String, List<String>> loadSchemaFromCacheFile() throws IOException {
+        File cacheFile = new File(schemaCacheFilePath);
+        if (!cacheFile.exists()) {
+            logger.info("Schema cache file not found at: {}", schemaCacheFilePath);
+            return null;
+        }
+
+        FileTime lastModified = Files.getLastModifiedTime(cacheFile.toPath());
+        long lastModifiedTimeMillis = lastModified.toMillis();
+
+        if ((System.currentTimeMillis() - lastModifiedTimeMillis) >= schemaCacheTtlMs) {
+            logger.info("Schema cache file is stale (last modified: {}). TTL: {}", lastModifiedTimeMillis, schemaCacheTtlMs);
+            // Optionally delete stale file: cacheFile.delete();
+            return null;
+        }
+
+        logger.info("Loading schema from cache file: {}", schemaCacheFilePath);
+        try {
+            String content = new String(Files.readAllBytes(cacheFile.toPath()));
+            TypeReference<HashMap<String, List<String>>> typeRef = new TypeReference<>() {};
+            return objectMapper.readValue(content, typeRef);
+        } catch (IOException e) {
+            logger.error("Error reading schema cache file: {}", schemaCacheFilePath, e);
+            // Optionally delete corrupted file: cacheFile.delete();
+            return null; // Treat as cache miss if file is corrupted
+        }
+    }
+
+    // New method to save schema to cache file
+    private void saveSchemaToCacheFile(Map<String, List<String>> schema) throws IOException {
+        File cacheFile = new File(schemaCacheFilePath);
+        // Ensure parent directory exists
+        File parentDir = cacheFile.getParentFile();
+        if (parentDir != null && !parentDir.exists()) {
+            if (!parentDir.mkdirs()) {
+                logger.error("Failed to create parent directories for schema cache file: {}", parentDir.getAbsolutePath());
+                // Decide how to handle this: throw exception or log and continue without saving
+                return;
+            }
+        }
+
+        try {
+            String jsonContent = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(schema);
+            Files.write(cacheFile.toPath(), jsonContent.getBytes());
+            logger.info("Schema saved to cache file: {}", schemaCacheFilePath);
+        } catch (IOException e) {
+            logger.error("Error writing schema to cache file: {}", schemaCacheFilePath, e);
+            // Decide how to handle this: throw exception or log and continue
+        }
+    }
+
+    // Thread-safety improvement: Synchronize access to schema operations
+    public synchronized Map<String, List<String>> getSchemaInfoThreadSafe() throws SQLException {
+        // Check in-memory cache first
+        if (cachedSchema != null && (System.currentTimeMillis() - lastSchemaFetchTime) < schemaCacheTtlMs) {
+            logger.info("Returning schema from in-memory cache.");
+            return cachedSchema;
+        }
+
+        // Try to load from persistent cache file
+        Map<String, List<String>> schema = null;
+        try {
+            schema = loadSchemaFromCacheFile();
+            if (schema != null) {
+                // Update in-memory cache and timestamp
+                this.cachedSchema = schema;
+                this.lastSchemaFetchTime = System.currentTimeMillis(); // Update timestamp to reflect file load time
+                logger.info("Schema loaded from persistent cache file.");
+                return schema;
+            }
+        } catch (IOException e) {
+            logger.error("Failed to load schema from cache file, proceeding to fetch from DB.", e);
+            // Continue to fetch from DB if file loading fails
+        }
+
+        // If not found in memory or persistent cache, fetch from database
+        logger.info("Fetching schema from database.");
+        Map<String, List<String>> dbSchema = new HashMap<>();
+
         try (Connection conn = dataSource.getConnection()) {
             String tableNameQuery;
             String columnQueryTemplate;
-            
+
             switch (config.getDatabaseType().toLowerCase()) {
                 case "mysql":
                     tableNameQuery = "SHOW TABLES";
@@ -198,27 +310,54 @@ public class DatabaseService {
             }
 
             try (Statement tableStmt = conn.createStatement();
-                    ResultSet tables = tableStmt.executeQuery(tableNameQuery)) {
+                 ResultSet tables = tableStmt.executeQuery(tableNameQuery)) {
 
                 while (tables.next()) {
                     String tableName = tables.getString(1);
                     List<String> columns = new ArrayList<>();
 
-                    // Use a separate statement for getting columns
                     try (Statement columnStmt = conn.createStatement();
-                            ResultSet columnsRS = columnStmt
-                                    .executeQuery(String.format(columnQueryTemplate, tableName))) {
+                         ResultSet columnsRS = columnStmt
+                                 .executeQuery(String.format(columnQueryTemplate, tableName))) {
 
                         while (columnsRS.next()) {
                             columns.add(columnsRS.getString(1));
                         }
                     }
 
-                    schema.put(tableName, columns);
+                    dbSchema.put(tableName, columns);
                 }
             }
         }
-        
-        return schema;
+
+        // Update in-memory cache and save to persistent cache file
+        this.cachedSchema = dbSchema;
+        this.lastSchemaFetchTime = System.currentTimeMillis();
+        try {
+            saveSchemaToCacheFile(dbSchema);
+        } catch (IOException e) {
+            logger.error("Failed to save schema to cache file after fetching from DB.", e);
+        }
+
+        return dbSchema;
+    }
+    
+    // Method to get the current schema, using the thread-safe version
+    public Map<String, List<String>> getSchemaInfo() throws SQLException {
+        return getSchemaInfoThreadSafe();
+    }
+    
+    // Method to explicitly clear the cache (useful for testing or manual refresh)
+    public synchronized void clearSchemaCache() {
+        this.cachedSchema = null;
+        this.lastSchemaFetchTime = 0;
+        File cacheFile = new File(schemaCacheFilePath);
+        if (cacheFile.exists()) {
+            if (cacheFile.delete()) {
+                logger.info("Schema cache file deleted: {}", schemaCacheFilePath);
+            } else {
+                logger.error("Failed to delete schema cache file: {}", schemaCacheFilePath);
+            }
+        }
     }
 }

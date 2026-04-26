@@ -18,14 +18,15 @@ public class AppConfig {
     private final int databasePort;
     private final int maxQueryRows;
     private final int queryTimeoutSeconds;
+    private final String databaseType;
     // SSH Config
     private final boolean sshEnabled;
     private final String sshHost;
     private final int sshPort;
     private final String sshUsername;
     private final String sshPrivateKeyPath;
-    private final String databaseType;
-    
+    private final long schemaCacheTtlMs;
+    private final String schemaCacheFilePath;
 
     public static AppConfig load() {
         Dotenv dotenv = Dotenv.configure()
@@ -47,6 +48,10 @@ public class AppConfig {
         String sshPortStr = dotenv.get("SSH_PORT", "22");
         String sshUsername = dotenv.get("SSH_USERNAME");
         String sshPrivateKeyPath = dotenv.get("SSH_PRIVATE_KEY_PATH");
+
+        // New: Schema cache configuration
+        String schemaCacheTtlMsStr = dotenv.get("SCHEMA_CACHE_TTL_MS", String.valueOf(5 * 60 * 1000)); // Default 5 minutes
+        String schemaCacheFilePath = dotenv.get("SCHEMA_CACHE_FILE_PATH", "schema_cache.json");
 
         // Validate required fields
         if (groqApiKey == null || groqApiKey.trim().isEmpty()) {
@@ -106,6 +111,17 @@ public class AppConfig {
             throw new RuntimeException("SSH_PORT must be a valid port number (1-65535)", e);
         }
 
+        // Parse schema cache TTL
+        long schemaCacheTtlMs;
+        try {
+            schemaCacheTtlMs = Long.parseLong(schemaCacheTtlMsStr);
+            if (schemaCacheTtlMs < 0) {
+                throw new NumberFormatException("TTL cannot be negative");
+            }
+        } catch (NumberFormatException e) {
+            throw new RuntimeException("SCHEMA_CACHE_TTL_MS must be a non-negative number", e);
+        }
+
         // If SSH is enabled, validate SSH fields
         if (sshEnabled) {
             if (sshHost == null || sshHost.trim().isEmpty()) {
@@ -135,14 +151,16 @@ public class AppConfig {
             sshPort,
             sshUsername,
             sshPrivateKeyPath,
-            databaseType
+            databaseType,
+            schemaCacheTtlMs, // Pass new config values
+            schemaCacheFilePath
         );
     }
 
     public AppConfig(Dotenv dotenv, String groqApiKey, String databaseName, String databaseUser, String databasePassword,
                      String databaseHost, int databasePort, int maxQueryRows, int queryTimeoutSeconds,
                      boolean sshEnabled, String sshHost, int sshPort, String sshUsername, String sshPrivateKeyPath,
-                     String databaseType) {
+                     String databaseType, long schemaCacheTtlMs, String schemaCacheFilePath) {
         this.dotenv = dotenv;
         this.groqApiKey = groqApiKey;
         this.databaseName = databaseName;
@@ -158,6 +176,8 @@ public class AppConfig {
         this.sshUsername = sshUsername;
         this.sshPrivateKeyPath = sshPrivateKeyPath;
         this.databaseType = databaseType;
+        this.schemaCacheTtlMs = schemaCacheTtlMs; // Assign new config values
+        this.schemaCacheFilePath = schemaCacheFilePath;
     }
 
     // Getters
@@ -172,20 +192,20 @@ public class AppConfig {
     public String getDatabaseType() { return databaseType; }
 
     // New getters for database properties and AI configuration
-    public String getDatabaseProperties() { 
-        return dotenv.get("DATABASE_PROPERTIES", "useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC"); 
-    }
-    
-    public String getAiProvider() { 
-        return dotenv.get("AI_PROVIDER", "groq"); 
+    public String getDatabaseProperties() {
+        return dotenv.get("DATABASE_PROPERTIES", "useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC");
     }
 
-    public String getAiModel() { 
-        return dotenv.get("AI_MODEL", "llama-3.1-8b-instant"); 
+    public String getAiProvider() {
+        return dotenv.get("AI_PROVIDER", "groq");
     }
 
-    public String getAiApiBaseUrl() { 
-        return dotenv.get("AI_API_BASE_URL", "https://api.groq.com/openai/v1"); 
+    public String getAiModel() {
+        return dotenv.get("AI_MODEL", "llama-3.1-8b-instant");
+    }
+
+    public String getAiApiBaseUrl() {
+        return dotenv.get("AI_API_BASE_URL", "https://api.groq.com/openai/v1");
     }
 
     // SSH getters
@@ -194,4 +214,8 @@ public class AppConfig {
     public int getSshPort() { return sshPort; }
     public String getSshUsername() { return sshUsername; }
     public String getSshPrivateKeyPath() { return sshPrivateKeyPath; }
+
+    // New getters for schema cache configuration
+    public long getSchemaCacheTtlMs() { return schemaCacheTtlMs; }
+    public String getSchemaCacheFilePath() { return schemaCacheFilePath; }
 }

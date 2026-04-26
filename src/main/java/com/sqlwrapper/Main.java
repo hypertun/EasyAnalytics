@@ -23,7 +23,7 @@ public class Main {
         try {
             config = AppConfig.load();
             dbService = new DatabaseService(config);
-            AIModelService aiService = new AIModelService(config);
+            AIModelService aiService = new AIModelService(config, dbService);
             SQLValidator validator = new SQLValidator();
 
             scanner = new Scanner(System.in);
@@ -32,25 +32,6 @@ public class Main {
             System.out.println("Type 'exit' to quit");
             System.out.println("Enter your analytics question:");
             
-            // Get the actual database schema ONCE at startup
-            Map<String, List<String>> schemaInfo;
-            try {
-                schemaInfo = dbService.getSchemaInfo();
-                logger.info("Database schema loaded with {} tables", schemaInfo.size());
-                
-                // Show schema summary to user
-                System.out.println("\n✅ Connected to database with " + schemaInfo.size() + " tables");
-                System.out.println("Available tables:");
-                for (String table : schemaInfo.keySet()) {
-                    System.out.println("  - " + table + " (" + schemaInfo.get(table).size() + " columns)");
-                }
-            } catch (Exception e) {
-                logger.error("Failed to retrieve database schema", e);
-                System.err.println("❌ Error: Failed to connect to database - " + e.getMessage());
-                // Don't return immediately - close resources first
-                throw e; // Rethrow to be caught by outer try-catch
-            }
-
             while (true) {
                 System.out.print("\n> ");
                 String question = scanner.nextLine().trim();
@@ -65,22 +46,22 @@ public class Main {
 
                 try {
                     // Pass the ACTUAL schema information to the AI service
-                    String sql = aiService.generateSQL(question, formatSchemaForPrompt(schemaInfo));
+                    String sql = aiService.generateSQL(question);
                     logger.info("Generated SQL: {}", sql);
 
                     if (!validator.isValid(sql)) {
                         logger.error("Invalid SQL detected: {}", sql);
-                        System.out.println("❌ Error: Generated SQL is not safe");
+                        System.out.println("Error: Generated SQL is not safe");
                         continue;
                     }
 
-                    System.out.println("\n✅ Executing query:");
+                    System.out.println("\nExecuting query:");
                     System.out.println(sql);
 
                     List<Map<String, Object>> results = dbService.executeQuery(sql, config.getMaxQueryRows());
                     logger.info("Query results: {}", mapper.writeValueAsString(results));
 
-                    System.out.println("\n📊 Query Results:");
+                    System.out.println("\nQuery Results:");
                     if (results.isEmpty()) {
                         System.out.println("No results found");
                     } else {
@@ -125,31 +106,5 @@ public class Main {
             }
             System.out.println("\nGoodbye!");
         }
-    }
-    
-    /**
-     * Formats the database schema into a human-readable string for the AI prompt
-     */
-    private static String formatSchemaForPrompt(Map<String, List<String>> schemaInfo) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("Database Schema Details:\n\n");
-        
-        if (schemaInfo.isEmpty()) {
-            sb.append("No tables found in the database.\n");
-            return sb.toString();
-        }
-        
-        for (Map.Entry<String, List<String>> entry : schemaInfo.entrySet()) {
-            String tableName = entry.getKey();
-            List<String> columns = entry.getValue();
-            
-            sb.append("Table: ").append(tableName).append("\n");
-            sb.append("Columns: ").append(String.join(", ", columns)).append("\n\n");
-        }
-        
-        sb.append("Important: Only use tables and columns that exist in the schema above.\n");
-        sb.append("Never generate queries for tables or columns that aren't listed here.\n");
-        
-        return sb.toString();
     }
 }
